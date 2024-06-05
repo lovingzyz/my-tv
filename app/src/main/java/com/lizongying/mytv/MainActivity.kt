@@ -1,5 +1,9 @@
 package com.lizongying.mytv
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -7,11 +11,17 @@ import android.util.Log
 import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.View
 import android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.lifecycleScope
 import com.lizongying.mytv.models.TVViewModel
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 
 
 class MainActivity : FragmentActivity(), Request.RequestListener {
@@ -21,7 +31,9 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
     private val mainFragment = MainFragment()
     private val infoFragment = InfoFragment()
     private val channelFragment = ChannelFragment()
+    private var timeFragment = TimeFragment()
     private val settingFragment = SettingFragment()
+    private val errorFragment = ErrorFragment()
 
     private var doubleBackToExitPressedOnce = false
 
@@ -31,13 +43,22 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
     private val delayHideMain: Long = 10000
     private val delayHideSetting: Long = 10000
 
+    init {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val utilsJob = async(start = CoroutineStart.LAZY) { Utils.init() }
+
+            utilsJob.start()
+
+//            utilsJob.await()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         Log.i(TAG, "onCreate")
         super.onCreate(savedInstanceState)
 
         setContentView(R.layout.activity_main)
 
-        Request.onCreate()
         Request.setRequestListener(this)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -47,6 +68,7 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         if (savedInstanceState == null) {
             supportFragmentManager.beginTransaction()
                 .add(R.id.main_browse_fragment, playerFragment)
+                .add(R.id.main_browse_fragment, timeFragment)
                 .add(R.id.main_browse_fragment, infoFragment)
                 .add(R.id.main_browse_fragment, channelFragment)
                 .add(R.id.main_browse_fragment, mainFragment)
@@ -54,6 +76,32 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
                 .commit()
         }
         gestureDetector = GestureDetector(this, GestureListener())
+
+        errorFragment.buttonClickListener = View.OnClickListener {
+            supportFragmentManager.beginTransaction()
+                .remove(errorFragment)
+                .commit()
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val connectivityManager =
+                getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            connectivityManager.registerDefaultNetworkCallback(object :
+                ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    super.onAvailable(network)
+                    Log.i(TAG, "net ${Build.VERSION.SDK_INT}")
+                    if (this@MainActivity.isNetworkConnected) {
+                        Log.i(TAG, "net isNetworkConnected")
+                        ready++
+                    }
+                }
+            })
+        } else {
+            Log.i(TAG, "net ${Build.VERSION.SDK_INT}")
+            ready++
+        }
+
     }
 
     fun showInfoFragment(tvViewModel: TVViewModel) {
@@ -120,9 +168,19 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         handler.postDelayed(hideMain, delayHideMain)
     }
 
-    fun settingActive() {
+    fun settingDelayHide() {
         handler.removeCallbacks(hideSetting)
         handler.postDelayed(hideSetting, delayHideSetting)
+        showTime()
+    }
+
+    fun settingHideNow() {
+        handler.removeCallbacks(hideSetting)
+        handler.postDelayed(hideSetting, 0)
+    }
+
+    fun settingNeverHide() {
+        handler.removeCallbacks(hideSetting)
     }
 
     private val hideMain = Runnable {
@@ -143,11 +201,29 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         }
     }
 
-    fun fragmentReady() {
+    fun fragmentReady(tag: String) {
         ready++
-        Log.i(TAG, "ready $ready")
-        if (ready == 5) {
+        Log.i(TAG, "ready $tag $ready ")
+        if (ready == 6) {
             mainFragment.fragmentReady()
+            showTime()
+        }
+    }
+
+    private fun showTime() {
+        Log.i(TAG, "showTime ${SP.time}")
+        if (SP.time) {
+            timeFragment.show()
+        } else {
+            timeFragment.hide()
+        }
+    }
+
+    fun isPlaying() {
+        if (errorFragment.isVisible) {
+            supportFragmentManager.beginTransaction()
+                .remove(errorFragment)
+                .commit()
         }
     }
 
@@ -211,7 +287,7 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         Log.i(TAG, "settingFragment ${settingFragment.isVisible}")
         if (!settingFragment.isVisible) {
             settingFragment.show(supportFragmentManager, "setting")
-            settingActive()
+            settingDelayHide()
         } else {
             handler.removeCallbacks(hideSetting)
             settingFragment.dismiss()
@@ -277,6 +353,7 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        Log.i(TAG, "keyCode $keyCode, event $event")
         when (keyCode) {
             KeyEvent.KEYCODE_0 -> {
                 showChannel("0")
@@ -388,28 +465,17 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
             }
 
             KeyEvent.KEYCODE_DPAD_LEFT -> {
-//                if (mainFragment.isHidden) {
-//                    prevSource()
-//                } else {
-////                    if (mainFragment.tvListViewModel.getTVViewModelCurrent()
-////                            ?.getItemPosition() == 0
-////                    ) {
-//////                        mainFragment.toLastPosition()
-////                        hideMainFragment()
-////                    }
-//                }
+                if (!mainFragment.isVisible && !settingFragment.isVisible) {
+                    switchMainFragment()
+                    return true
+                }
             }
 
             KeyEvent.KEYCODE_DPAD_RIGHT -> {
-//                if (mainFragment.isHidden) {
-//                    nextSource()
-//                } else {
-////                    if (mainFragment.tvListViewModel.getTVViewModelCurrent()
-////                            ?.getItemPosition() == mainFragment.tvListViewModel.maxNum[mainFragment.selectedPosition] - 1
-////                    ) {
-////                        mainFragment.toFirstPosition()
-////                    }
-//                }
+                if (!mainFragment.isVisible && !settingFragment.isVisible) {
+                    showSetting()
+                    return true
+                }
             }
         }
 
@@ -442,8 +508,14 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         Request.onDestroy()
     }
 
-    override fun onRequestFinished() {
-        fragmentReady()
+    override fun onRequestFinished(message: String?) {
+        if (message != null && !errorFragment.isVisible) {
+            supportFragmentManager.beginTransaction()
+                .add(R.id.main_browse_fragment, errorFragment)
+                .commitNow()
+            errorFragment.setErrorContent(message)
+        }
+        fragmentReady("Request")
     }
 
     private companion object {
